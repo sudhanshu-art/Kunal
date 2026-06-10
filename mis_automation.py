@@ -52,7 +52,7 @@ GOOGLE_SHEET_GID = "2029444177"
 SA_FILE          = os.getenv("GOOGLE_SA_FILE", "service_account.json")
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_PORT = int(os.getenv("SMTP_PORT") or "587")
 SMTP_USER = os.getenv("SMTP_USER", "sudhanshu@parcelx.in")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 
