@@ -1,33 +1,53 @@
-# Kunal MIS Report — Automation
+# Kunal MIS — Google Apps Script (Recommended)
 
-Auto-downloads the ParcelX MIS report for **Kunal Chauhan** (last 30 days),
-pushes it to Google Sheets, and emails the team — 4x daily.
+Pulls **live shipment data** directly from Metabase API → writes to Google Sheet → emails Kunal.
 
-| Time | IST | UTC cron |
-|------|-----|----------|
-| Morning   | 09:00 | 03:30 |
-| Afternoon | 13:00 | 07:30 |
-| Evening   | 16:00 | 10:30 |
-| Night     | 20:00 | 14:30 |
+**No ParcelX panel login. No OTP. No browser. No server.**
 
-## GitHub Secrets to add (Settings → Secrets → Actions)
+---
 
-| Secret | Value |
-|--------|-------|
-| `PARCELX_BASIC_USER` | `pax` |
-| `PARCELX_BASIC_PASS` | `cloud@4w5` |
-| `PARCELX_FORM_USER`  | `Sudhanshu` |
-| `PARCELX_FORM_PASS`  | `@shudh@@$%` |
-| `SMTP_HOST`          | `smtp.gmail.com` |
-| `SMTP_PORT`          | `587` |
-| `SMTP_USER`          | `sudhanshu@parcelx.in` |
-| `SMTP_PASS`          | Gmail App Password |
-| `GOOGLE_SA_JSON`     | Full contents of service account JSON |
+## How it works
+```
+Google Apps Script
+  → Metabase API (mb.parcelx.in)
+    → Live shipments table (last 30 days, Kunal's sellers)
+      → Google Sheet (raw data + pivot)
+        → Gmail (kunal.chauhan@parcelx.in + CC)
+```
 
-## Flow
-1. Selenium logs into panel.parcelx.in (Basic Auth + form login)
-2. MIS Report → Non-Mandatory Fields → Sales POC → Kunal Chauhan
-3. Date range: today − 30 days → today
-4. Search → Export Excel → download .xlsx
-5. Upload to Google Sheet (gid=2029444177)
-6. Email to kunal.chauhan@parcelx.in (CC: sudhanshu, sparsh)
+## Setup (5 minutes)
+
+### 1. Open Apps Script
+Open your Google Sheet → **Extensions → Apps Script**
+
+### 2. Paste the code
+Delete everything → paste the full contents of `KunalMIS.gs`
+
+### 3. Set credentials
+⚙️ Project Settings → Script Properties → Add:
+
+| Property | Value |
+|---|---|
+| `METABASE_USER` | your Metabase login email |
+| `METABASE_PASS` | your Metabase password |
+
+### 4. Test
+Select `runMIS` → click ▶ Run → accept permissions
+
+### 5. Schedule
+Select `setupTrigger` → click ▶ Run
+
+This sets **daily 9 AM IST** trigger. To add more times (1pm, 4pm, 8pm), run `setupTrigger` — it creates all 4.
+
+---
+
+## What it produces
+
+| Output | Where |
+|---|---|
+| Raw data | Sheet tab "MIS Data" |
+| Pivot (seller/courier/date) | Sheet tab "Pivot" |
+| Email | kunal.chauhan@parcelx.in (CC: sudhanshu, sparsh) |
+
+## Statuses tracked
+`Booked · Manifested · Not Picked · Pickup Pending · Out For Pickup`
