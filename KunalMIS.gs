@@ -74,7 +74,7 @@ WHERE s.user_status IN (221, 222, 231, 232, 238)
   AND s.user_id IN (
       SELECT user_id FROM child_sales_poc_user_assign WHERE admin_id = 38
   )
-  AND s.added_on >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+  AND s.added_on >= DATE_SUB(NOW(), INTERVAL 40 DAY)
 ORDER BY s.added_on DESC
 LIMIT 5000
 `;
