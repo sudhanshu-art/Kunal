@@ -1,0 +1,64 @@
+name: Kunal MIS Report
+
+on:
+  schedule:
+    - cron: "30 3 * * *"    #  9:00 AM IST
+    - cron: "30 7 * * *"    #  1:00 PM IST
+    - cron: "30 10 * * *"   #  4:00 PM IST
+    - cron: "30 14 * * *"   #  8:00 PM IST
+  workflow_dispatch:
+
+jobs:
+  run-mis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Google Chrome
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq google-chrome-stable
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service_account.json
+        run: echo '${{ secrets.GOOGLE_SA_JSON }}' > service_account.json
+
+      - name: Run MIS job
+        env:
+          PARCELX_BASIC_USER: ${{ secrets.PARCELX_BASIC_USER }}
+          PARCELX_BASIC_PASS: ${{ secrets.PARCELX_BASIC_PASS }}
+          PARCELX_FORM_USER:  ${{ secrets.PARCELX_FORM_USER }}
+          PARCELX_FORM_PASS:  ${{ secrets.PARCELX_FORM_PASS }}
+          SMTP_HOST:          ${{ secrets.SMTP_HOST }}
+          SMTP_PORT:          ${{ secrets.SMTP_PORT }}
+          SMTP_USER:          ${{ secrets.SMTP_USER }}
+          SMTP_PASS:          ${{ secrets.SMTP_PASS }}
+          GOOGLE_SA_FILE:     service_account.json
+          DOWNLOAD_DIR:       /tmp/mis_downloads
+        run: python run_once.py
+
+      - name: Upload Excel artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mis-report-${{ github.run_id }}
+          path: /tmp/mis_downloads/*.xls*
+          retention-days: 30
+
+      - name: Upload error screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshots-${{ github.run_id }}
+          path: /tmp/mis_downloads/error_*.png
+          retention-days: 7
