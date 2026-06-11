@@ -1,30 +1,22 @@
 /**
- * KunalMIS_Panel.gs  — v5
- * Pulls data directly from panel.parcelx.in (no Metabase)
+ * KunalMIS_Panel.gs  — v6
+ * Pulls data from panel.parcelx.in (no Metabase)
+ * Export URL confirmed: /mis_report?export=excel&...  (returns HTML table @ 1.1MB)
  *
- * HOW TO GET COOKIES (do this after every login):
+ * HOW TO REFRESH COOKIES (every ~7 days):
  *  1. Log in to panel.parcelx.in in Chrome (complete OTP)
- *  2. Open DevTools (F12) → Network tab
- *  3. Go to panel.parcelx.in/mis_report
- *  4. Click ANY request to panel.parcelx.in → Headers → copy the full "Cookie:" value
- *  5. Paste into Script Properties → PARCELX_COOKIES
- *
- * SETUP:
- *  1. Enable Drive API: Services (+) → Drive API → Add
- *  2. Set Script Properties: PARCELX_COOKIES (from step above)
- *  3. Run testConnection() to verify
- *  4. Run testFindExportUrl() to discover export endpoint
- *  5. Run setupTrigger() once for daily 9 AM IST
+ *  2. F12 → Network tab → navigate to panel.parcelx.in/mis_report
+ *  3. Click the mis_report request → Request Headers → copy "Cookie:" value
+ *  4. Script Properties → PARCELX_COOKIES → paste
  */
 
-// ── CONFIG ────────────────────────────────────────────────────────────────────
 const CFG = {
   sheetId   : '1gUwZoO0v3Rjkx4XshHHuBUwPyMfLY7KaE7UfzBEPLyE',
   dataTab   : 'MIS Data',
   pivotTab  : 'Pivot',
   emailTo   : 'kunal.chauhan@parcelx.in',
   emailCc   : 'sudhanshu@parcelx.in,sparsh@parcelx.in',
-  alertEmail: 'sudhanshu@parcelx.in',   // gets session-expired alerts
+  alertEmail: 'sudhanshu@parcelx.in',
   panelBase : 'https://panel.parcelx.in',
   basicUser : 'pax',
   basicPass : 'cloud@4w5',
@@ -49,7 +41,7 @@ const COLS_WANTED = [
   'NDR First Date', 'NDR First Remarks', 'NDR Last Date', 'NDR Last Remarks'
 ];
 
-const STATUSES   = ['Booked','Manifested','Not Picked','Out For Pickup','Pickup Pending'];
+const STATUSES  = ['Booked','Manifested','Not Picked','Out For Pickup','Pickup Pending'];
 const STATUS_CLR = {
   'Booked':'#3498db','Manifested':'#9b59b6','Not Picked':'#e74c3c',
   'Out For Pickup':'#e67e22','Pickup Pending':'#f1c40f'
@@ -65,20 +57,29 @@ function runMIS() {
     const { fromStr, toStr } = getDateRange_();
     Logger.log('Range: ' + fromStr + ' → ' + toStr);
 
+    // 1. Trigger search (loads data server-side)
     triggerSearch_(headers, fromStr, toStr);
 
-    const blob = downloadExcel_(headers, fromStr, toStr);
-    const { allHeaders, allRows } = parseData_(blob);
-    Logger.log('Export cols: ' + allHeaders.length + ', rows: ' + allRows.length);
+    // 2. Download export (HTML table @ ~1.1MB)
+    const html = downloadExport_(headers, fromStr, toStr);
 
-    const { colIdx, finalHeaders } = mapColumns_(allHeaders);
-    const finalRows = allRows.map(r =>
-      finalHeaders.map((_, i) => colIdx[i] !== -1 ? r[colIdx[i]] : '')
+    // 3. Parse HTML table → headers + rows
+    const { exportHeaders, exportRows } = parseHtmlTable_(html);
+    Logger.log('Export cols: ' + exportHeaders.length + ', rows: ' + exportRows.length);
+
+    if (exportRows.length === 0)
+      throw new Error('No data rows found in export. Check if search returned results.');
+
+    // 4. Filter to 43 wanted columns
+    const { colIdx } = mapColumns_(exportHeaders);
+    const finalRows = exportRows.map(r =>
+      COLS_WANTED.map((_, i) => colIdx[i] !== -1 ? (r[colIdx[i]] || '') : '')
     );
 
-    writeSheet_(finalHeaders, finalRows);
-    writePivot_(finalHeaders, finalRows);
-    sendEmail_(finalHeaders, finalRows);
+    // 5. Write → Sheet, Pivot, Email
+    writeSheet_(COLS_WANTED, finalRows);
+    writePivot_(COLS_WANTED, finalRows);
+    sendEmail_(COLS_WANTED, finalRows);
     Logger.log('✅ Done — ' + finalRows.length + ' rows');
 
   } catch (err) {
@@ -89,60 +90,15 @@ function runMIS() {
 }
 
 
-// ── ERROR HANDLER — sends alert email on session expiry ───────────────────────
-function handleError_(err) {
-  const msg = err.toString();
-  const isSession = msg.includes('SESSION_EXPIRED') || msg.includes('OTP_REQUIRED');
-
-  const subject = isSession
-    ? '⚠️ ParcelX MIS — Session Expired (action needed)'
-    : '❌ ParcelX MIS — Script Error';
-
-  const body = isSession ? `
-<div style="font-family:Arial,sans-serif;max-width:580px;margin:0 auto">
-  <div style="background:#e74c3c;padding:20px 24px;border-radius:8px 8px 0 0">
-    <h2 style="margin:0;color:#fff">⚠️ MIS Session Expired</h2>
-  </div>
-  <div style="background:#fff;padding:20px 24px;border:1px solid #ddd;border-top:none">
-    <p>The ParcelX panel session has expired. The MIS report could not run.</p>
-    <p><strong>To fix — takes 2 minutes:</strong></p>
-    <ol>
-      <li>Open Chrome → go to <a href="https://panel.parcelx.in">panel.parcelx.in</a></li>
-      <li>Log in (complete OTP as usual)</li>
-      <li>Open DevTools → <strong>Network</strong> tab</li>
-      <li>Navigate to <strong>panel.parcelx.in/mis_report</strong></li>
-      <li>Click any request → Headers → copy the full <strong>Cookie:</strong> value</li>
-      <li>Open <a href="https://script.google.com">script.google.com</a> → your project → ⚙️ Project Settings → Script Properties</li>
-      <li>Update <strong>PARCELX_COOKIES</strong> with the copied value</li>
-      <li>Run <strong>runMIS()</strong> manually to confirm it works</li>
-    </ol>
-    <p style="font-size:12px;color:#999">Sessions typically last 7–14 days.</p>
-  </div>
-</div>` : `<pre>${msg}</pre>`;
-
-  GmailApp.sendEmail(
-    CFG.alertEmail,
-    subject,
-    isSession ? 'ParcelX session expired. Please refresh cookies.' : msg,
-    { htmlBody: body, name: 'ParcelX MIS Alert' }
-  );
-  Logger.log('Alert email sent to ' + CFG.alertEmail);
-}
-
-
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 function getStoredCookies_() {
-  const props = PropertiesService.getScriptProperties();
-  const raw   = props.getProperty('PARCELX_COOKIES');
-  if (!raw) throw new Error(
-    'PARCELX_COOKIES not set in Script Properties.\n' +
-    'See script header for instructions on how to get the cookie string.'
-  );
-  // Accept raw string OR JSON array
+  const raw = PropertiesService.getScriptProperties().getProperty('PARCELX_COOKIES');
+  if (!raw || raw.length < 10)
+    throw new Error('PARCELX_COOKIES not set. See script header for instructions.');
   try {
     const arr = JSON.parse(raw);
     if (Array.isArray(arr)) return arr.map(c => c.name + '=' + c.value).join('; ');
-  } catch (e) {}
+  } catch(e) {}
   return raw.trim();
 }
 
@@ -151,24 +107,23 @@ function buildHeaders_(cookies) {
     'Authorization'   : 'Basic ' + Utilities.base64Encode(CFG.basicUser + ':' + CFG.basicPass),
     'Cookie'          : cookies,
     'X-Requested-With': 'XMLHttpRequest',
-    'Accept'          : 'text/html,application/json,*/*',
+    'Accept'          : '*/*',
     'User-Agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
   };
 }
 
-function isSessionExpired_(body) {
-  const b = body.toLowerCase();
+function checkSession_(body) {
+  const b = body.substring(0, 3000).toLowerCase();
   if (b.includes('enter otp') || b.includes('input the otp'))
-    throw new Error('OTP_REQUIRED: Session expired. Please log in and update PARCELX_COOKIES.');
-  if ((b.includes('login') || b.includes('sign in')) && b.includes('password') && !b.includes('mis_report'))
-    throw new Error('SESSION_EXPIRED: Please log in again and update PARCELX_COOKIES in Script Properties.');
+    throw new Error('OTP_REQUIRED: Session expired. Log in again and update PARCELX_COOKIES.');
+  if ((b.includes('password') || b.includes('sign in')) && !b.includes('mis_report') && !b.includes('searchbtn'))
+    throw new Error('SESSION_EXPIRED: Session expired. Log in again and update PARCELX_COOKIES.');
 }
 
 
 // ── DATES ─────────────────────────────────────────────────────────────────────
 function getDateRange_() {
-  const to   = new Date();
-  const from = new Date();
+  const to = new Date(), from = new Date();
   from.setDate(from.getDate() - CFG.daysBack);
   return {
     fromStr: Utilities.formatDate(from, 'Asia/Kolkata', 'dd-MM-yyyy'),
@@ -179,122 +134,111 @@ function getDateRange_() {
 
 // ── SEARCH ────────────────────────────────────────────────────────────────────
 function triggerSearch_(headers, fromStr, toStr) {
-  const payload =
-    'from_date='  + encodeURIComponent(fromStr) +
-    '&to_date='   + encodeURIComponent(toStr)   +
-    '&sales_poc=' + CFG.salesPoc                +
-    '&box8=1&searchbtn=1';
-
-  Logger.log('Triggering search...');
-  const resp = UrlFetchApp.fetch(CFG.panelBase + '/mis_report', {
-    method            : 'post',
-    headers           : Object.assign({}, headers, { 'Content-Type': 'application/x-www-form-urlencoded' }),
-    payload           : payload,
-    muteHttpExceptions: true,
-    followRedirects   : true
-  });
-
-  Logger.log('Search → ' + resp.getResponseCode());
-  isSessionExpired_(resp.getContentText());
-  Utilities.sleep(2500);
-}
-
-
-// ── DOWNLOAD ─────────────────────────────────────────────────────────────────
-function downloadExcel_(headers, fromStr, toStr) {
-  const props      = PropertiesService.getScriptProperties();
-  const overrideUrl = props.getProperty('EXPORT_URL_OVERRIDE');
-
-  const candidates = overrideUrl ? [overrideUrl] : [
-    CFG.panelBase + '/mis_report/export_excel',
-    CFG.panelBase + '/mis_report/exportexcel',
-    CFG.panelBase + '/mis_report/export',
-    CFG.panelBase + '/mis_report/download',
-    CFG.panelBase + '/mis_report/excel',
-    CFG.panelBase + '/mis_report/export_csv',
-    CFG.panelBase + '/mis_report/csv',
-    CFG.panelBase + '/export/mis',
-    CFG.panelBase + '/mis_report?export=excel&from_date=' + fromStr + '&to_date=' + toStr + '&sales_poc=' + CFG.salesPoc + '&box8=1',
-    CFG.panelBase + '/mis_report?type=excel&from_date=' + fromStr + '&to_date=' + toStr + '&sales_poc=' + CFG.salesPoc,
-    CFG.panelBase + '/mis_report?export=csv&from_date='  + fromStr + '&to_date=' + toStr + '&sales_poc=' + CFG.salesPoc
-  ];
-
-  for (const url of candidates) {
-    try {
-      Logger.log('Trying: ' + url);
-      const resp = UrlFetchApp.fetch(url, { headers, muteHttpExceptions: true, followRedirects: true });
-      const code = resp.getResponseCode();
-      const ct   = (resp.getHeaders()['Content-Type'] || resp.getHeaders()['content-type'] || '').toLowerCase();
-      Logger.log('  ' + code + ' | ' + ct.substring(0, 70));
-
-      if (code === 200 && isFileResponse_(ct)) {
-        Logger.log('✅ Got file from: ' + url);
-        props.setProperty('EXPORT_URL_OVERRIDE', url); // remember it
-        return resp.getBlob().setContentType(ct.split(';')[0].trim());
-      }
-    } catch (e) { Logger.log('  error: ' + e); }
-  }
-
-  // POST fallback
-  const postPayload = 'from_date=' + encodeURIComponent(fromStr) +
+  const payload = 'from_date=' + encodeURIComponent(fromStr) +
     '&to_date=' + encodeURIComponent(toStr) +
-    '&sales_poc=' + CFG.salesPoc + '&box8=1&export=1';
+    '&sales_poc=' + CFG.salesPoc + '&box8=1&searchbtn=1';
 
-  for (const url of [CFG.panelBase + '/mis_report', CFG.panelBase + '/mis_report/export']) {
-    try {
-      const resp = UrlFetchApp.fetch(url, {
-        method: 'post',
-        headers: Object.assign({}, headers, { 'Content-Type': 'application/x-www-form-urlencoded' }),
-        payload: postPayload, muteHttpExceptions: true
-      });
-      const ct = (resp.getHeaders()['Content-Type'] || '').toLowerCase();
-      if (resp.getResponseCode() === 200 && isFileResponse_(ct)) {
-        Logger.log('✅ POST export worked: ' + url);
-        return resp.getBlob().setContentType(ct.split(';')[0].trim());
-      }
-    } catch (e) { Logger.log('  POST error: ' + e); }
-  }
-
-  throw new Error(
-    'Could not download data file.\n' +
-    'Run testFindExportUrl() — it will log which URL returns the Excel/CSV.\n' +
-    'Then call setExportUrl("the_url") to save it.'
-  );
-}
-
-function isFileResponse_(ct) {
-  return ct.includes('spreadsheetml') || ct.includes('excel') ||
-         ct.includes('octet-stream')  || ct.includes('openxmlformats') ||
-         ct.includes('ms-excel')      || ct.includes('csv');
+  const resp = UrlFetchApp.fetch(CFG.panelBase + '/mis_report', {
+    method: 'post',
+    headers: Object.assign({}, headers, { 'Content-Type': 'application/x-www-form-urlencoded' }),
+    payload, muteHttpExceptions: true, followRedirects: true
+  });
+  Logger.log('Search → ' + resp.getResponseCode());
+  checkSession_(resp.getContentText());
+  Utilities.sleep(2000);
 }
 
 
-// ── PARSE ─────────────────────────────────────────────────────────────────────
-function parseData_(blob) {
-  const ct = (blob.getContentType() || '').toLowerCase();
+// ── DOWNLOAD (confirmed URL) ───────────────────────────────────────────────────
+function downloadExport_(headers, fromStr, toStr) {
+  // Confirmed working URL from testFindExportUrl() — returns HTML table @ ~1.1MB
+  const url = CFG.panelBase +
+    '/mis_report?export=excel' +
+    '&from_date=' + encodeURIComponent(fromStr) +
+    '&to_date='   + encodeURIComponent(toStr) +
+    '&sales_poc=' + CFG.salesPoc +
+    '&box8=1';
 
-  if (ct.includes('csv') || ct.includes('text')) {
-    const rows = Utilities.parseCsv(blob.getDataAsString('UTF-8'));
-    return { allHeaders: rows[0] || [], allRows: rows.slice(1) };
+  Logger.log('Downloading: ' + url);
+  const resp = UrlFetchApp.fetch(url, { headers, muteHttpExceptions: true, followRedirects: true });
+  const code = resp.getResponseCode();
+  const size = resp.getBlob().getBytes().length;
+  Logger.log('Download → ' + code + ' | ' + size + ' bytes');
+
+  if (code !== 200)
+    throw new Error('Export returned HTTP ' + code);
+
+  const body = resp.getContentText('UTF-8');
+  checkSession_(body);
+
+  if (size < 5000)
+    throw new Error('Export file too small (' + size + ' bytes) — no data or wrong URL.');
+
+  return body;
+}
+
+
+// ── HTML TABLE PARSER ─────────────────────────────────────────────────────────
+function parseHtmlTable_(html) {
+  // Strip scripts, styles, comments to simplify parsing
+  const cleaned = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
+
+  function cellText(cellHtml) {
+    return cellHtml
+      .replace(/<[^>]+>/g, ' ')          // strip all tags
+      .replace(/&amp;/g,  '&')
+      .replace(/&lt;/g,   '<')
+      .replace(/&gt;/g,   '>')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&#160;/g, ' ')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g,  "'")
+      .replace(/\s+/g,    ' ')
+      .trim();
   }
 
-  // Excel → convert via Drive Advanced Service
-  const tempName = 'kunal_mis_' + Date.now();
-  const xlsBlob  = blob.setName(tempName + '.xlsx')
-    .setContentType('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-
-  let fileId = null;
-  try {
-    const f = Drive.Files.insert(
-      { title: tempName, mimeType: 'application/vnd.google-apps.spreadsheet' },
-      xlsBlob, { convert: true }
-    );
-    fileId = f.id;
-    const raw = SpreadsheetApp.openById(fileId).getSheets()[0].getDataRange().getValues();
-    return { allHeaders: (raw[0] || []).map(String), allRows: raw.slice(1) };
-  } finally {
-    if (fileId) try { Drive.Files.remove(fileId); } catch(e) {}
+  function parseRow(trHtml) {
+    const cells = [];
+    const re = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let m;
+    while ((m = re.exec(trHtml)) !== null) cells.push(cellText(m[1]));
+    return cells;
   }
+
+  // Find header row (first <tr> with <th> tags, or first <tr> inside <thead>)
+  let exportHeaders = [];
+  const theadMatch = cleaned.match(/<thead[\s\S]*?>([\s\S]*?)<\/thead>/i);
+  if (theadMatch) {
+    const trMatch = theadMatch[1].match(/<tr[^>]*>([\s\S]*?)<\/tr>/i);
+    if (trMatch) exportHeaders = parseRow(trMatch[1]);
+  }
+
+  if (exportHeaders.length === 0) {
+    // No thead — try first <tr> of table
+    const firstTr = cleaned.match(/<tr[^>]*>([\s\S]*?)<\/tr>/i);
+    if (firstTr) exportHeaders = parseRow(firstTr[1]);
+  }
+
+  // All data rows — find tbody or all <tr> after header
+  const exportRows = [];
+  const tbodyMatch = cleaned.match(/<tbody[\s\S]*?>([\s\S]*?)<\/tbody>/i);
+  const bodyHtml   = tbodyMatch ? tbodyMatch[1] : cleaned;
+
+  const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let trMatch;
+  while ((trMatch = trRe.exec(bodyHtml)) !== null) {
+    const row = parseRow(trMatch[1]);
+    if (row.length > 0 && row.some(c => c !== '')) exportRows.push(row);
+  }
+
+  Logger.log('Parsed headers: ' + exportHeaders.length + ', rows: ' + exportRows.length);
+  if (exportHeaders.length > 0) Logger.log('First 5 headers: ' + exportHeaders.slice(0,5).join(' | '));
+  if (exportRows.length > 0)    Logger.log('First row sample: ' + exportRows[0].slice(0,5).join(' | '));
+
+  return { exportHeaders, exportRows };
 }
 
 
@@ -309,20 +253,22 @@ function mapColumns_(exportHeaders) {
     return idx;
   });
   const missed = COLS_WANTED.filter((_, i) => colIdx[i] === -1);
-  if (missed.length) Logger.log('Blank cols (not found in export): ' + missed.join(', '));
-  return { colIdx, finalHeaders: COLS_WANTED.slice() };
+  if (missed.length) Logger.log('Blank (not matched): ' + missed.join(', '));
+  return { colIdx };
 }
 
 
-// ── SHEET ─────────────────────────────────────────────────────────────────────
+// ── WRITE SHEET ───────────────────────────────────────────────────────────────
 function writeSheet_(headers, rows) {
   const ss    = SpreadsheetApp.openById(CFG.sheetId);
   let   sheet = ss.getSheetByName(CFG.dataTab) || ss.insertSheet(CFG.dataTab, 0);
   sheet.clearContents();
   const now = Utilities.formatDate(new Date(), 'Asia/Kolkata', "dd MMM yyyy, hh:mm a 'IST'");
   sheet.getRange(1,1).setValue('Kunal Chauhan MIS — Updated: ' + now);
-  sheet.getRange(1,1,1,headers.length).merge().setBackground('#1a1a2e').setFontColor('#ffffff').setFontWeight('bold');
-  sheet.getRange(2,1,1,headers.length).setValues([headers]).setFontWeight('bold').setBackground('#e8ecf0');
+  sheet.getRange(1,1,1,headers.length).merge()
+       .setBackground('#1a1a2e').setFontColor('#ffffff').setFontWeight('bold');
+  sheet.getRange(2,1,1,headers.length).setValues([headers])
+       .setFontWeight('bold').setBackground('#e8ecf0');
   if (rows.length) sheet.getRange(3,1,rows.length,headers.length).setValues(rows);
   sheet.setFrozenRows(2);
   headers.forEach((_, i) => sheet.autoResizeColumn(i + 1));
@@ -367,7 +313,8 @@ function writePivot_(headers, rows) {
 
   const maxC = Math.max(...out.map(r=>r.length||1));
   sheet.getRange(1,1,out.length,maxC).setValues(out);
-  sheet.getRange(1,1,1,maxC).merge().setBackground('#1a1a2e').setFontColor('#ffffff').setFontWeight('bold');
+  sheet.getRange(1,1,1,maxC).merge()
+       .setBackground('#1a1a2e').setFontColor('#ffffff').setFontWeight('bold');
 }
 
 
@@ -382,44 +329,83 @@ function sendEmail_(headers, rows) {
     <tr>
       <td style="padding:9px 16px;border-bottom:1px solid #f0f0f0;font-size:14px">${s}</td>
       <td style="padding:9px 16px;border-bottom:1px solid #f0f0f0;text-align:center">
-        <span style="background:${STATUS_CLR[s]};color:#fff;padding:3px 14px;border-radius:12px;font-weight:700">${counts[s]}</span>
-      </td></tr>`).join('');
+        <span style="background:${STATUS_CLR[s]};color:#fff;padding:3px 14px;
+              border-radius:12px;font-weight:700;font-size:13px">${counts[s]}</span>
+      </td>
+    </tr>`).join('');
 
   const html = `
-<div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto">
+<div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#333">
   <div style="background:#1a1a2e;padding:24px 28px;border-radius:8px 8px 0 0">
-    <h2 style="margin:0;color:#fff">📦 ParcelX MIS Report</h2>
-    <p style="margin:6px 0 0;color:#aaa;font-size:13px">Kunal Chauhan &nbsp;·&nbsp; ${now} &nbsp;·&nbsp; Last ${CFG.daysBack} Days</p>
+    <h2 style="margin:0;color:#fff;font-size:20px">📦 ParcelX MIS Report</h2>
+    <p style="margin:6px 0 0;color:#aaa;font-size:13px">
+      Kunal Chauhan &nbsp;·&nbsp; ${now} &nbsp;·&nbsp; Last ${CFG.daysBack} Days
+    </p>
   </div>
   <div style="background:#fff;padding:22px 28px;border:1px solid #ddd;border-top:none">
-    <p><strong>Total orders:</strong> ${rows.length}</p>
-    <table style="width:100%;border-collapse:collapse">
+    <p style="margin:0 0 14px;font-size:14px"><strong>Total orders:</strong> ${rows.length}</p>
+    <table style="width:100%;border-collapse:collapse;background:#fafafa;border-radius:6px">
       <tr style="background:#f0f2f5">
-        <th style="padding:10px 16px;text-align:left">Status</th>
-        <th style="padding:10px 16px;text-align:center">Count</th>
+        <th style="padding:10px 16px;text-align:left;font-size:13px">Status</th>
+        <th style="padding:10px 16px;text-align:center;font-size:13px">Count</th>
       </tr>${statusRows}
     </table>
     <div style="text-align:center;margin:20px 0 8px">
       <a href="https://docs.google.com/spreadsheets/d/${CFG.sheetId}"
-         style="background:#34a853;color:#fff;padding:11px 28px;border-radius:6px;text-decoration:none;font-weight:700">
+         style="display:inline-block;background:#34a853;color:#fff;
+                padding:11px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:14px">
         📊 Open Google Sheet
       </a>
     </div>
-    <p style="font-size:12px;color:#999;text-align:center">CSV attached — ${rows.length} rows, ${headers.length} columns</p>
+    <p style="margin:12px 0 0;font-size:12px;color:#999;text-align:center">
+      CSV attached — ${rows.length} rows · ${headers.length} columns
+    </p>
   </div>
 </div>`;
 
-  const esc = v => { const s=String(v==null?'':v); return (s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s; };
-  const csv = [COLS_WANTED.map(esc).join(','), ...rows.map(r=>r.map(esc).join(','))].join('\n');
-  const dateTag = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'ddMMMyyyy');
+  const esc = v => {
+    const s = String(v == null ? '' : v);
+    return (s.includes(',') || s.includes('"') || s.includes('\n'))
+      ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const csv = [COLS_WANTED.map(esc).join(','),
+               ...rows.map(r => r.map(esc).join(','))].join('\n');
+  const tag = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'ddMMMyyyy');
 
   GmailApp.sendEmail(CFG.emailTo,
     'ParcelX MIS | Kunal Chauhan | ' + now,
     rows.length + ' orders. CSV attached.',
     { htmlBody: html, cc: CFG.emailCc, name: 'ParcelX MIS',
-      attachments: [Utilities.newBlob(csv, 'text/csv', 'Kunal_MIS_'+dateTag+'.csv')] }
+      attachments: [Utilities.newBlob(csv, 'text/csv', 'Kunal_MIS_' + tag + '.csv')] }
   );
   Logger.log('✅ Email → ' + CFG.emailTo);
+}
+
+
+// ── ERROR HANDLER ─────────────────────────────────────────────────────────────
+function handleError_(err) {
+  const msg = err.toString();
+  const isSession = msg.includes('SESSION_EXPIRED') || msg.includes('OTP_REQUIRED');
+  const subject = isSession ? '⚠️ ParcelX MIS — Session Expired' : '❌ ParcelX MIS — Error';
+  const body = isSession ? `
+<div style="font-family:Arial,sans-serif;max-width:580px">
+  <div style="background:#e74c3c;padding:20px;border-radius:8px 8px 0 0">
+    <h2 style="margin:0;color:#fff">⚠️ MIS Session Expired</h2>
+  </div>
+  <div style="background:#fff;padding:20px;border:1px solid #ddd;border-top:none">
+    <p>The automation could not run because the ParcelX session expired.</p>
+    <p><strong>Fix in 2 minutes:</strong></p>
+    <ol>
+      <li>Go to <a href="https://panel.parcelx.in">panel.parcelx.in</a> → log in (complete OTP)</li>
+      <li>F12 → Network tab → open mis_report page</li>
+      <li>Click the request → Request Headers → copy <strong>Cookie:</strong> value</li>
+      <li><a href="https://script.google.com">script.google.com</a> → Project Settings → Script Properties → update <strong>PARCELX_COOKIES</strong></li>
+    </ol>
+  </div>
+</div>` : '<pre>' + msg + '</pre>';
+  try {
+    GmailApp.sendEmail(CFG.alertEmail, subject, msg.substring(0,500), { htmlBody: body, name: 'ParcelX MIS Alert' });
+  } catch(e) {}
 }
 
 
@@ -434,46 +420,28 @@ function setupTrigger() {
 
 
 // ── DEBUG ─────────────────────────────────────────────────────────────────────
-/** Step 1: Run this first to check if cookies work */
 function testConnection() {
   const cookies = getStoredCookies_();
-  const headers = buildHeaders_(cookies);
-  const resp = UrlFetchApp.fetch(CFG.panelBase + '/mis_report', { headers, muteHttpExceptions: true });
+  const resp = UrlFetchApp.fetch(CFG.panelBase + '/mis_report', {
+    headers: buildHeaders_(cookies), muteHttpExceptions: true
+  });
   const body = resp.getContentText();
-  Logger.log('Response code: ' + resp.getResponseCode());
-  Logger.log('Page has mis_report content: ' + body.includes('mis_report'));
-  Logger.log('Session expired?: ' + (body.toLowerCase().includes('login') && !body.includes('mis_report')));
-  Logger.log('OTP page?: ' + body.toLowerCase().includes('enter otp'));
-  Logger.log('First 800 chars:\n' + body.substring(0, 800));
+  Logger.log('Code: ' + resp.getResponseCode());
+  Logger.log('Has searchbtn: ' + body.includes('searchbtn'));
+  Logger.log('Has mis_report: ' + body.includes('mis_report'));
+  Logger.log('Session OK: ' + (!body.toLowerCase().includes('enter otp') && body.includes('searchbtn')));
 }
 
-/** Step 2: Run after testConnection() passes — finds the export URL */
-function testFindExportUrl() {
+function testParseOnly() {
+  // Test just the download + parse without writing to sheet
   const cookies = getStoredCookies_();
   const headers = buildHeaders_(cookies);
   const { fromStr, toStr } = getDateRange_();
   triggerSearch_(headers, fromStr, toStr);
-
-  const paths = [
-    '/mis_report/export_excel', '/mis_report/exportexcel', '/mis_report/export',
-    '/mis_report/download', '/mis_report/excel', '/mis_report/export_csv', '/mis_report/csv',
-    '/export/mis', '/mis_report?export=excel&from_date='+fromStr+'&to_date='+toStr+'&sales_poc='+CFG.salesPoc+'&box8=1',
-    '/mis_report?export=csv&from_date='+fromStr+'&to_date='+toStr+'&sales_poc='+CFG.salesPoc
-  ];
-
-  paths.forEach(path => {
-    try {
-      const r = UrlFetchApp.fetch(CFG.panelBase + path, { headers, muteHttpExceptions: true });
-      const ct = r.getHeaders()['Content-Type'] || '';
-      const size = r.getBlob().getBytes().length;
-      Logger.log(r.getResponseCode() + ' | ' + size + ' bytes | ' + ct.substring(0,60) + '  →  ' + path);
-    } catch(e) { Logger.log('ERR | ' + path + ' | ' + e); }
-  });
-  Logger.log('\nLook for a 200 response with excel/spreadsheet content type and size > 1000 bytes');
-}
-
-/** After finding the URL from testFindExportUrl(), save it here */
-function setExportUrl(url) {
-  PropertiesService.getScriptProperties().setProperty('EXPORT_URL_OVERRIDE', url);
-  Logger.log('✅ Export URL saved: ' + url);
+  const html = downloadExport_(headers, fromStr, toStr);
+  const { exportHeaders, exportRows } = parseHtmlTable_(html);
+  Logger.log('Headers found (' + exportHeaders.length + '): ' + exportHeaders.join(' | '));
+  Logger.log('Row 1: ' + (exportRows[0] || []).join(' | '));
+  Logger.log('Row 2: ' + (exportRows[1] || []).join(' | '));
+  Logger.log('Total rows: ' + exportRows.length);
 }
